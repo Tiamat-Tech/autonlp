@@ -13,18 +13,17 @@ this_directory = os.path.abspath(os.path.dirname(__file__))
 with open(os.path.join(this_directory, "README.md"), encoding="utf-8") as f:
     LONG_DESCRIPTION = f.read()
 
-INSTALL_REQUIRES = [
-    "loguru==0.7.0",
-    "requests==2.28.2",
-    "tqdm==4.65.0",
-    "pandas>=1.5.3",
-    "huggingface_hub==0.13.4",
-    "datasets~=2.10.0",
-    "scikit-learn==1.2.2",
-    "streamlit==1.22.0",
-    "streamlit-aggrid==0.3.3",
-    "gradio==3.32.0",
-]
+# get INSTALL_REQUIRES from requirements.txt
+INSTALL_REQUIRES = []
+requirements_path = os.path.join(this_directory, "requirements.txt")
+with open(requirements_path, encoding="utf-8") as f:
+    for line in f:
+        # Exclude 'bitsandbytes' if installing on macOS
+        if "bitsandbytes" in line:
+            line = line.strip() + " ; sys_platform == 'linux'"
+            INSTALL_REQUIRES.append(line.strip())
+        else:
+            INSTALL_REQUIRES.append(line.strip())
 
 QUALITY_REQUIRE = [
     "black",
@@ -34,8 +33,11 @@ QUALITY_REQUIRE = [
 
 TESTS_REQUIRE = ["pytest"]
 
+CLIENT_REQUIRES = ["requests", "loguru"]
+
 
 EXTRAS_REQUIRE = {
+    "base": INSTALL_REQUIRES,
     "dev": INSTALL_REQUIRES + QUALITY_REQUIRE + TESTS_REQUIRE,
     "quality": INSTALL_REQUIRES + QUALITY_REQUIRE,
     "docs": INSTALL_REQUIRES
@@ -46,6 +48,7 @@ EXTRAS_REQUIRE = {
         "sphinx-rtd-theme==0.4.3",
         "sphinx-copybutton",
     ],
+    "client": CLIENT_REQUIRES,
 }
 
 setup(
@@ -73,7 +76,31 @@ setup(
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     keywords="automl autonlp autotrain huggingface",
+    data_files=[
+        (
+            "static",
+            [
+                "src/autotrain/app/static/logo.png",
+                "src/autotrain/app/static/scripts/fetch_data_and_update_models.js",
+                "src/autotrain/app/static/scripts/listeners.js",
+                "src/autotrain/app/static/scripts/utils.js",
+                "src/autotrain/app/static/scripts/poll.js",
+                "src/autotrain/app/static/scripts/logs.js",
+            ],
+        ),
+        (
+            "templates",
+            [
+                "src/autotrain/app/templates/index.html",
+                "src/autotrain/app/templates/error.html",
+                "src/autotrain/app/templates/duplicate.html",
+                "src/autotrain/app/templates/login.html",
+            ],
+        ),
+    ],
+    include_package_data=True,
 )

@@ -1,133 +1,79 @@
-import traceback
-from typing import Dict, Optional
+import json
+import os
+import subprocess
 
-import requests
-import streamlit as st
-from huggingface_hub import HfFolder
-from loguru import logger
-
-from autotrain import config
-from autotrain.tasks import TASKS
-
-
-FORMAT_TAG = "\033[{code}m"
-RESET_TAG = FORMAT_TAG.format(code=0)
-BOLD_TAG = FORMAT_TAG.format(code=1)
-RED_TAG = FORMAT_TAG.format(code=91)
-GREEN_TAG = FORMAT_TAG.format(code=92)
-YELLOW_TAG = FORMAT_TAG.format(code=93)
-PURPLE_TAG = FORMAT_TAG.format(code=95)
-CYAN_TAG = FORMAT_TAG.format(code=96)
+from autotrain.commands import launch_command
+from autotrain.trainers.clm.params import LLMTrainingParams
+from autotrain.trainers.extractive_question_answering.params import ExtractiveQuestionAnsweringParams
+from autotrain.trainers.generic.params import GenericParams
+from autotrain.trainers.image_classification.params import ImageClassificationParams
+from autotrain.trainers.image_regression.params import ImageRegressionParams
+from autotrain.trainers.object_detection.params import ObjectDetectionParams
+from autotrain.trainers.sent_transformers.params import SentenceTransformersParams
+from autotrain.trainers.seq2seq.params import Seq2SeqParams
+from autotrain.trainers.tabular.params import TabularParams
+from autotrain.trainers.text_classification.params import TextClassificationParams
+from autotrain.trainers.text_regression.params import TextRegressionParams
+from autotrain.trainers.token_classification.params import TokenClassificationParams
+from autotrain.trainers.vlm.params import VLMTrainingParams
 
 
-class UnauthenticatedError(Exception):
-    pass
+ALLOW_REMOTE_CODE = os.environ.get("ALLOW_REMOTE_CODE", "true").lower() == "true"
 
 
-class UnreachableAPIError(Exception):
-    pass
+def run_training(params, task_id, local=False, wait=False):
+    """
+    Run the training process based on the provided parameters and task ID.
 
+    Args:
+        params (str): JSON string of the parameters required for training.
+        task_id (int): Identifier for the type of task to be performed.
+        local (bool, optional): Flag to indicate if the training should be run locally. Defaults to False.
+        wait (bool, optional): Flag to indicate if the function should wait for the process to complete. Defaults to False.
 
-def get_auth_headers(token: str, prefix: str = "Bearer"):
-    return {"Authorization": f"{prefix} {token}"}
+    Returns:
+        int: Process ID of the launched training process.
 
-
-def http_get(
-    path: str,
-    token: str,
-    domain: str = config.AUTOTRAIN_BACKEND_API,
-    token_prefix: str = "Bearer",
-    suppress_logs: bool = False,
-    **kwargs,
-) -> requests.Response:
-    """HTTP GET request to the AutoNLP API, raises UnreachableAPIError if the API cannot be reached"""
-    logger.info(f"Sending GET request to {domain + path}")
-    try:
-        response = requests.get(
-            url=domain + path, headers=get_auth_headers(token=token, prefix=token_prefix), **kwargs
-        )
-    except requests.exceptions.ConnectionError:
-        raise UnreachableAPIError("❌ Failed to reach AutoNLP API, check your internet connection")
-    response.raise_for_status()
-    return response
-
-
-def http_post(
-    path: str,
-    token: str,
-    payload: Optional[Dict] = None,
-    domain: str = config.AUTOTRAIN_BACKEND_API,
-    suppress_logs: bool = False,
-    **kwargs,
-) -> requests.Response:
-    """HTTP POST request to the AutoNLP API, raises UnreachableAPIError if the API cannot be reached"""
-    logger.info(f"Sending POST request to {domain + path}")
-    try:
-        response = requests.post(
-            url=domain + path, json=payload, headers=get_auth_headers(token=token), allow_redirects=True, **kwargs
-        )
-    except requests.exceptions.ConnectionError:
-        raise UnreachableAPIError("❌ Failed to reach AutoNLP API, check your internet connection")
-    response.raise_for_status()
-    return response
-
-
-def get_task(task_id: int) -> str:
-    for key, value in TASKS.items():
-        if value == task_id:
-            return key
-    return "❌ Unsupported task! Please update autonlp"
-
-
-def get_user_token():
-    return HfFolder.get_token()
-
-
-def user_authentication(token):
-    logger.info("Authenticating user...")
-    headers = {}
-    cookies = {}
-    if token.startswith("hf_"):
-        headers["Authorization"] = f"Bearer {token}"
+    Raises:
+        NotImplementedError: If the task_id does not match any of the predefined tasks.
+    """
+    params = json.loads(params)
+    if isinstance(params, str):
+        params = json.loads(params)
+    if task_id == 9:
+        params = LLMTrainingParams(**params)
+    elif task_id == 28:
+        params = Seq2SeqParams(**params)
+    elif task_id in (1, 2):
+        params = TextClassificationParams(**params)
+    elif task_id in (13, 14, 15, 16, 26):
+        params = TabularParams(**params)
+    elif task_id == 27:
+        params = GenericParams(**params)
+    elif task_id == 18:
+        params = ImageClassificationParams(**params)
+    elif task_id == 4:
+        params = TokenClassificationParams(**params)
+    elif task_id == 10:
+        params = TextRegressionParams(**params)
+    elif task_id == 29:
+        params = ObjectDetectionParams(**params)
+    elif task_id == 30:
+        params = SentenceTransformersParams(**params)
+    elif task_id == 24:
+        params = ImageRegressionParams(**params)
+    elif task_id == 31:
+        params = VLMTrainingParams(**params)
+    elif task_id == 5:
+        params = ExtractiveQuestionAnsweringParams(**params)
     else:
-        cookies = {"token": token}
-    try:
-        response = requests.get(
-            config.HF_API + "/api/whoami-v2",
-            headers=headers,
-            cookies=cookies,
-            timeout=3,
-        )
-    except (requests.Timeout, ConnectionError) as err:
-        logger.error(f"Failed to request whoami-v2 - {repr(err)}")
-        raise Exception("Hugging Face Hub is unreachable, please try again later.")
-    return response.json()
+        raise NotImplementedError
 
-
-def get_project_cost(username, token, task, num_samples, num_models):
-    logger.info("Getting project cost...")
-    task_id = TASKS[task]
-    pricing = http_get(
-        path=f"/pricing/compute?username={username}&task_id={task_id}&num_samples={num_samples}&num_models={num_models}",
-        token=token,
-    )
-    return pricing.json()["price"]
-
-
-def app_error_handler(func):
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except Exception as err:
-            logger.error(f"{func.__name__} has failed due to an exception:")
-            logger.error(traceback.format_exc())
-            if "param_choice" in str(err):
-                st.warning("Unable to estimate costs. Job params not chosen yet.")
-            elif "Failed to reach AutoNLP API" in str(err):
-                st.warning("Unable to reach AutoTrain API. Please check your internet connection.")
-            elif "An error has occurred: 'NoneType' object has no attribute 'type'" in str(err):
-                st.warning("Unable to estimate costs. Data not uploaded yet.")
-            else:
-                st.error(f"An error has occurred: {err}")
-
-    return wrapper
+    params.save(output_dir=params.project_name)
+    cmd = launch_command(params=params)
+    cmd = [str(c) for c in cmd]
+    env = os.environ.copy()
+    process = subprocess.Popen(cmd, env=env)
+    if wait:
+        process.wait()
+    return process.pid

@@ -3,14 +3,26 @@
 .vscode/
 test/
 test.py
-
+output/
+output2/
+logs/
+op_*/
+autotrain.db
+autotrain.log
+*.db
+data/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-
+autotrain-data*
+autotrain-*
+op-*
 # C extensions
 *.so
+test.yml
+test.ipynb
+output.png
 
 # Distribution / packaging
 .Python

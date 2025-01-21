@@ -1,28 +1,46 @@
 - sections: 
   - local: index
     title: 🤗 AutoTrain
-  - local: getting_started
-    title: Installation
   - local: cost
     title: How much does it cost?
   - local: support
     title: Get help and support
-  title: Get started
+  - local: faq
+    title: Frequently Asked Questions
+  title: Getting Started
 - sections:
-  - local: model_choice
-    title: Model Selection
-  - local: param_choice
-    title: Parameter Selection
-  title: Selecting Models and Parameters
-- sections: 
-  - local: text_classification
-    title: Text Classification
-  - local: llm_finetuning
+  - local: quickstart_spaces
+    title: Train on Spaces
+  - local: quickstart_py
+    title: Python SDK
+  - local: quickstart
+    title: Train Locally
+  - local: config
+    title: Config File
+  title: Quickstart
+- sections:
+  - local: tasks/llm_finetuning
     title: LLM Finetuning
-  title: Text Tasks
+  - local: tasks/text_classification_regression
+    title: Text Classification/Regression
+  - local: tasks/extractive_qa
+    title: Extractive QA
+  - local: tasks/sentence_transformer
+    title: Sentence Transformer
+  - local: tasks/image_classification_regression
+    title: Image Classification / Regression
+  - local: tasks/object_detection
+    title: Object Detection
+  - local: tasks/seq2seq
+    title: Seq2Seq
+  - local: tasks/token_classification
+    title: Token Classification
+  - local: tasks/tabular
+    title: Tabular
+  title: Tasks
 - sections:
-  - local: image_classification
-    title: Image Classification
-  - local: dreambooth
-    title: DreamBooth
-  title: Image Tasks
+  - local: col_map
+    title: Understanding Column Mapping
+  - local: autotrain_api
+    title: AutoTrain API
+  title: Miscellaneous

@@ -2,140 +2,562 @@
 Copyright 2023 The HuggingFace Team
 """
 
-import time
+import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Union
 
-from loguru import logger
+from autotrain.backends.base import AVAILABLE_HARDWARE
+from autotrain.backends.endpoints import EndpointsRunner
+from autotrain.backends.local import LocalRunner
+from autotrain.backends.ngc import NGCRunner
+from autotrain.backends.nvcf import NVCFRunner
+from autotrain.backends.spaces import SpaceRunner
+from autotrain.dataset import (
+    AutoTrainDataset,
+    AutoTrainImageClassificationDataset,
+    AutoTrainImageRegressionDataset,
+    AutoTrainObjectDetectionDataset,
+    AutoTrainVLMDataset,
+)
+from autotrain.trainers.clm.params import LLMTrainingParams
+from autotrain.trainers.extractive_question_answering.params import ExtractiveQuestionAnsweringParams
+from autotrain.trainers.image_classification.params import ImageClassificationParams
+from autotrain.trainers.image_regression.params import ImageRegressionParams
+from autotrain.trainers.object_detection.params import ObjectDetectionParams
+from autotrain.trainers.sent_transformers.params import SentenceTransformersParams
+from autotrain.trainers.seq2seq.params import Seq2SeqParams
+from autotrain.trainers.tabular.params import TabularParams
+from autotrain.trainers.text_classification.params import TextClassificationParams
+from autotrain.trainers.text_regression.params import TextRegressionParams
+from autotrain.trainers.token_classification.params import TokenClassificationParams
+from autotrain.trainers.vlm.params import VLMTrainingParams
 
-from autotrain.dataset import AutoTrainDataset, AutoTrainDreamboothDataset, AutoTrainImageClassificationDataset
-from autotrain.languages import SUPPORTED_LANGUAGES
-from autotrain.tasks import TASKS
-from autotrain.utils import http_get, http_post
+
+def tabular_munge_data(params, local):
+    if isinstance(params.target_columns, str):
+        col_map_label = [params.target_columns]
+    else:
+        col_map_label = params.target_columns
+    task = params.task
+    if task == "classification" and len(col_map_label) > 1:
+        task = "tabular_multi_label_classification"
+    elif task == "classification" and len(col_map_label) == 1:
+        task = "tabular_multi_class_classification"
+    elif task == "regression" and len(col_map_label) > 1:
+        task = "tabular_multi_column_regression"
+    elif task == "regression" and len(col_map_label) == 1:
+        task = "tabular_single_column_regression"
+    else:
+        raise Exception("Please select a valid task.")
+
+    exts = ["csv", "jsonl"]
+    ext_to_use = None
+    for ext in exts:
+        path = f"{params.data_path}/{params.train_split}.{ext}"
+        if os.path.exists(path):
+            ext_to_use = ext
+            break
+
+    train_data_path = f"{params.data_path}/{params.train_split}.{ext_to_use}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}.{ext_to_use}"
+    else:
+        valid_data_path = None
+    if os.path.exists(train_data_path):
+        dset = AutoTrainDataset(
+            train_data=[train_data_path],
+            task=task,
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            column_mapping={"id": params.id_column, "label": col_map_label},
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
+            percent_valid=None,  # TODO: add to UI
+            local=local,
+            ext=ext_to_use,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = "validation"
+        params.id_column = "autotrain_id"
+        if len(col_map_label) == 1:
+            params.target_columns = ["autotrain_label"]
+        else:
+            params.target_columns = [f"autotrain_label_{i}" for i in range(len(col_map_label))]
+    return params
+
+
+def llm_munge_data(params, local):
+    exts = ["csv", "jsonl"]
+    ext_to_use = None
+    for ext in exts:
+        path = f"{params.data_path}/{params.train_split}.{ext}"
+        if os.path.exists(path):
+            ext_to_use = ext
+            break
+
+    train_data_path = f"{params.data_path}/{params.train_split}.{ext_to_use}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}.{ext_to_use}"
+    else:
+        valid_data_path = None
+    if os.path.exists(train_data_path):
+        col_map = {"text": params.text_column}
+        if params.rejected_text_column is not None:
+            col_map["rejected_text"] = params.rejected_text_column
+        if params.prompt_text_column is not None:
+            col_map["prompt"] = params.prompt_text_column
+        dset = AutoTrainDataset(
+            train_data=[train_data_path],
+            task="lm_training",
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            column_mapping=col_map,
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
+            percent_valid=None,  # TODO: add to UI
+            local=local,
+            ext=ext_to_use,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = None
+        params.text_column = "autotrain_text"
+        params.rejected_text_column = "autotrain_rejected_text"
+        params.prompt_text_column = "autotrain_prompt"
+    return params
+
+
+def seq2seq_munge_data(params, local):
+    exts = ["csv", "jsonl"]
+    ext_to_use = None
+    for ext in exts:
+        path = f"{params.data_path}/{params.train_split}.{ext}"
+        if os.path.exists(path):
+            ext_to_use = ext
+            break
+
+    train_data_path = f"{params.data_path}/{params.train_split}.{ext_to_use}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}.{ext_to_use}"
+    else:
+        valid_data_path = None
+    if os.path.exists(train_data_path):
+        dset = AutoTrainDataset(
+            train_data=[train_data_path],
+            task="seq2seq",
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            column_mapping={"text": params.text_column, "label": params.target_column},
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
+            percent_valid=None,  # TODO: add to UI
+            local=local,
+            ext=ext_to_use,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = "validation"
+        params.text_column = "autotrain_text"
+        params.target_column = "autotrain_label"
+    return params
+
+
+def text_clf_munge_data(params, local):
+    exts = ["csv", "jsonl"]
+    ext_to_use = None
+    for ext in exts:
+        path = f"{params.data_path}/{params.train_split}.{ext}"
+        if os.path.exists(path):
+            ext_to_use = ext
+            break
+
+    train_data_path = f"{params.data_path}/{params.train_split}.{ext_to_use}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}.{ext_to_use}"
+    else:
+        valid_data_path = None
+    if os.path.exists(train_data_path):
+        dset = AutoTrainDataset(
+            train_data=[train_data_path],
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
+            task="text_multi_class_classification",
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            column_mapping={"text": params.text_column, "label": params.target_column},
+            percent_valid=None,  # TODO: add to UI
+            local=local,
+            convert_to_class_label=True,
+            ext=ext_to_use,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = "validation"
+        params.text_column = "autotrain_text"
+        params.target_column = "autotrain_label"
+    return params
+
+
+def text_reg_munge_data(params, local):
+    exts = ["csv", "jsonl"]
+    ext_to_use = None
+    for ext in exts:
+        path = f"{params.data_path}/{params.train_split}.{ext}"
+        if os.path.exists(path):
+            ext_to_use = ext
+            break
+
+    train_data_path = f"{params.data_path}/{params.train_split}.{ext_to_use}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}.{ext_to_use}"
+    else:
+        valid_data_path = None
+    if os.path.exists(train_data_path):
+        dset = AutoTrainDataset(
+            train_data=[train_data_path],
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
+            task="text_single_column_regression",
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            column_mapping={"text": params.text_column, "label": params.target_column},
+            percent_valid=None,  # TODO: add to UI
+            local=local,
+            convert_to_class_label=False,
+            ext=ext_to_use,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = "validation"
+        params.text_column = "autotrain_text"
+        params.target_column = "autotrain_label"
+    return params
+
+
+def token_clf_munge_data(params, local):
+    exts = ["csv", "jsonl"]
+    ext_to_use = None
+    for ext in exts:
+        path = f"{params.data_path}/{params.train_split}.{ext}"
+        if os.path.exists(path):
+            ext_to_use = ext
+            break
+
+    train_data_path = f"{params.data_path}/{params.train_split}.{ext_to_use}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}.{ext_to_use}"
+    else:
+        valid_data_path = None
+    if os.path.exists(train_data_path):
+        dset = AutoTrainDataset(
+            train_data=[train_data_path],
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
+            task="text_token_classification",
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            column_mapping={"text": params.tokens_column, "label": params.tags_column},
+            percent_valid=None,  # TODO: add to UI
+            local=local,
+            convert_to_class_label=True,
+            ext=ext_to_use,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = "validation"
+        params.tokens_column = "autotrain_text"
+        params.tags_column = "autotrain_label"
+    return params
+
+
+def img_clf_munge_data(params, local):
+    train_data_path = f"{params.data_path}/{params.train_split}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}"
+    else:
+        valid_data_path = None
+    if os.path.isdir(train_data_path):
+        dset = AutoTrainImageClassificationDataset(
+            train_data=train_data_path,
+            valid_data=valid_data_path,
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            local=local,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = "validation"
+        params.image_column = "autotrain_image"
+        params.target_column = "autotrain_label"
+    return params
+
+
+def img_obj_detect_munge_data(params, local):
+    train_data_path = f"{params.data_path}/{params.train_split}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}"
+    else:
+        valid_data_path = None
+    if os.path.isdir(train_data_path):
+        dset = AutoTrainObjectDetectionDataset(
+            train_data=train_data_path,
+            valid_data=valid_data_path,
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            local=local,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = "validation"
+        params.image_column = "autotrain_image"
+        params.objects_column = "autotrain_objects"
+    return params
+
+
+def sent_transformers_munge_data(params, local):
+    exts = ["csv", "jsonl"]
+    ext_to_use = None
+    for ext in exts:
+        path = f"{params.data_path}/{params.train_split}.{ext}"
+        if os.path.exists(path):
+            ext_to_use = ext
+            break
+
+    train_data_path = f"{params.data_path}/{params.train_split}.{ext_to_use}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}.{ext_to_use}"
+    else:
+        valid_data_path = None
+    if os.path.exists(train_data_path):
+        dset = AutoTrainDataset(
+            train_data=[train_data_path],
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
+            task="sentence_transformers",
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            column_mapping={
+                "sentence1": params.sentence1_column,
+                "sentence2": params.sentence2_column,
+                "sentence3": params.sentence3_column,
+                "target": params.target_column,
+            },
+            percent_valid=None,  # TODO: add to UI
+            local=local,
+            convert_to_class_label=True if params.trainer == "pair_class" else False,
+            ext=ext_to_use,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = "validation"
+        params.sentence1_column = "autotrain_sentence1"
+        params.sentence2_column = "autotrain_sentence2"
+        params.sentence3_column = "autotrain_sentence3"
+        params.target_column = "autotrain_target"
+    return params
+
+
+def img_reg_munge_data(params, local):
+    train_data_path = f"{params.data_path}/{params.train_split}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}"
+    else:
+        valid_data_path = None
+    if os.path.isdir(train_data_path):
+        dset = AutoTrainImageRegressionDataset(
+            train_data=train_data_path,
+            valid_data=valid_data_path,
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            local=local,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = "validation"
+        params.image_column = "autotrain_image"
+        params.target_column = "autotrain_label"
+    return params
+
+
+def vlm_munge_data(params, local):
+    train_data_path = f"{params.data_path}/{params.train_split}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}"
+    else:
+        valid_data_path = None
+    if os.path.exists(train_data_path):
+        col_map = {"text": params.text_column}
+        if params.prompt_text_column is not None:
+            col_map["prompt"] = params.prompt_text_column
+        dset = AutoTrainVLMDataset(
+            train_data=train_data_path,
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            column_mapping=col_map,
+            valid_data=valid_data_path if valid_data_path is not None else None,
+            percent_valid=None,  # TODO: add to UI
+            local=local,
+        )
+        params.data_path = dset.prepare()
+        params.text_column = "autotrain_text"
+        params.image_column = "autotrain_image"
+        params.prompt_text_column = "autotrain_prompt"
+    return params
+
+
+def ext_qa_munge_data(params, local):
+    exts = ["csv", "jsonl"]
+    ext_to_use = None
+    for ext in exts:
+        path = f"{params.data_path}/{params.train_split}.{ext}"
+        if os.path.exists(path):
+            ext_to_use = ext
+            break
+
+    train_data_path = f"{params.data_path}/{params.train_split}.{ext_to_use}"
+    if params.valid_split is not None:
+        valid_data_path = f"{params.data_path}/{params.valid_split}.{ext_to_use}"
+    else:
+        valid_data_path = None
+    if os.path.exists(train_data_path):
+        dset = AutoTrainDataset(
+            train_data=[train_data_path],
+            valid_data=[valid_data_path] if valid_data_path is not None else None,
+            task="text_extractive_question_answering",
+            token=params.token,
+            project_name=params.project_name,
+            username=params.username,
+            column_mapping={
+                "text": params.text_column,
+                "question": params.question_column,
+                "answer": params.answer_column,
+            },
+            percent_valid=None,  # TODO: add to UI
+            local=local,
+            convert_to_class_label=True,
+            ext=ext_to_use,
+        )
+        params.data_path = dset.prepare()
+        params.valid_split = "validation"
+        params.text_column = "autotrain_text"
+        params.question_column = "autotrain_question"
+        params.answer_column = "autotrain_answer"
+    return params
 
 
 @dataclass
-class Project:
-    dataset: Union[AutoTrainDataset, AutoTrainDreamboothDataset, AutoTrainImageClassificationDataset]
-    param_choice: Optional[str] = "autotrain"
-    hub_model: Optional[str] = None
-    job_params: Optional[List[Dict[str, str]]] = None
+class AutoTrainProject:
+    """
+    A class to train an AutoTrain project
+
+    Attributes
+    ----------
+    params : Union[
+        LLMTrainingParams,
+        TextClassificationParams,
+        TabularParams,
+        Seq2SeqParams,
+        ImageClassificationParams,
+        TextRegressionParams,
+        ObjectDetectionParams,
+        TokenClassificationParams,
+        SentenceTransformersParams,
+        ImageRegressionParams,
+        ExtractiveQuestionAnsweringParams,
+        VLMTrainingParams,
+    ]
+        The parameters for the AutoTrain project.
+    backend : str
+        The backend to be used for the AutoTrain project. It should be one of the following:
+        - local
+        - spaces-a10g-large
+        - spaces-a10g-small
+        - spaces-a100-large
+        - spaces-t4-medium
+        - spaces-t4-small
+        - spaces-cpu-upgrade
+        - spaces-cpu-basic
+        - spaces-l4x1
+        - spaces-l4x4
+        - spaces-l40sx1
+        - spaces-l40sx4
+        - spaces-l40sx8
+        - spaces-a10g-largex2
+        - spaces-a10g-largex4
+    process : bool
+        Flag to indicate if the params and dataset should be processed. If your data format is not AutoTrain-readable, set it to True. Set it to True when in doubt. Defaults to False.
+
+    Methods
+    -------
+    __post_init__():
+        Validates the backend attribute.
+    create():
+        Creates a runner based on the backend and initializes the AutoTrain project.
+    """
+
+    params: Union[
+        LLMTrainingParams,
+        TextClassificationParams,
+        TabularParams,
+        Seq2SeqParams,
+        ImageClassificationParams,
+        TextRegressionParams,
+        ObjectDetectionParams,
+        TokenClassificationParams,
+        SentenceTransformersParams,
+        ImageRegressionParams,
+        ExtractiveQuestionAnsweringParams,
+        VLMTrainingParams,
+    ]
+    backend: str
+    process: bool = False
 
     def __post_init__(self):
-        self.token = self.dataset.token
-        self.name = self.dataset.project_name
-        self.username = self.dataset.username
-        self.task = self.dataset.task
+        self.local = self.backend.startswith("local")
+        if self.backend not in AVAILABLE_HARDWARE:
+            raise ValueError(f"Invalid backend: {self.backend}")
 
-        self.param_choice = self.param_choice.lower()
-
-        if self.hub_model is not None:
-            if len(self.hub_model) == 0:
-                self.hub_model = None
-
-        if self.job_params is None:
-            self.job_params = []
-
-        logger.info(f"🚀🚀🚀 Creating project {self.name}, task: {self.task}")
-        logger.info(f"🚀 Using username: {self.username}")
-        logger.info(f"🚀 Using param_choice: {self.param_choice}")
-        logger.info(f"🚀 Using hub_model: {self.hub_model}")
-        logger.info(f"🚀 Using job_params: {self.job_params}")
-
-        if self.token is None:
-            raise ValueError("❌ Please login using `huggingface-cli login`")
-
-        if self.hub_model is not None and len(self.job_params) == 0:
-            raise ValueError("❌ Job parameters are required when hub model is specified.")
-
-        if self.hub_model is None and len(self.job_params) > 1:
-            raise ValueError("❌ Only one job parameter is allowed in AutoTrain mode.")
-
-        if self.param_choice == "autotrain":
-            if "source_language" in self.job_params[0] and "target_language" not in self.job_params[0]:
-                self.language = self.job_params[0]["source_language"]
-                # remove source language from job params
-                self.job_params[0].pop("source_language")
-            elif "source_language" in self.job_params[0] and "target_language" in self.job_params[0]:
-                self.language = f'{self.job_params[0]["target_language"]}2{self.job_params[0]["source_language"]}'
-                # remove source and target language from job params
-                self.job_params[0].pop("source_language")
-                self.job_params[0].pop("target_language")
-            else:
-                self.language = "unk"
-
-            if "num_models" in self.job_params[0]:
-                self.max_models = self.job_params[0]["num_models"]
-                self.job_params[0].pop("num_models")
-            elif "num_models" not in self.job_params[0] and "source_language" in self.job_params[0]:
-                raise ValueError("❌ Please specify num_models in job_params when using AutoTrain model")
+    def _process_params_data(self):
+        if isinstance(self.params, LLMTrainingParams):
+            return llm_munge_data(self.params, self.local)
+        elif isinstance(self.params, ExtractiveQuestionAnsweringParams):
+            return ext_qa_munge_data(self.params, self.local)
+        elif isinstance(self.params, ImageClassificationParams):
+            return img_clf_munge_data(self.params, self.local)
+        elif isinstance(self.params, ImageRegressionParams):
+            return img_reg_munge_data(self.params, self.local)
+        elif isinstance(self.params, ObjectDetectionParams):
+            return img_obj_detect_munge_data(self.params, self.local)
+        elif isinstance(self.params, SentenceTransformersParams):
+            return sent_transformers_munge_data(self.params, self.local)
+        elif isinstance(self.params, Seq2SeqParams):
+            return seq2seq_munge_data(self.params, self.local)
+        elif isinstance(self.params, TabularParams):
+            return tabular_munge_data(self.params, self.local)
+        elif isinstance(self.params, TextClassificationParams):
+            return text_clf_munge_data(self.params, self.local)
+        elif isinstance(self.params, TextRegressionParams):
+            return text_reg_munge_data(self.params, self.local)
+        elif isinstance(self.params, TokenClassificationParams):
+            return token_clf_munge_data(self.params, self.local)
+        elif isinstance(self.params, VLMTrainingParams):
+            return vlm_munge_data(self.params, self.local)
         else:
-            self.language = "unk"
-            self.max_models = len(self.job_params)
+            raise Exception("Invalid params class")
 
     def create(self):
-        """Create a project and return it"""
-        logger.info(f"🚀 Creating project {self.name}, task: {self.task}")
-        task_id = TASKS.get(self.task)
-        if task_id is None:
-            raise ValueError(f"❌ Invalid task selected. Please choose one of {TASKS.keys()}")
-        language = str(self.language).strip().lower()
-        if task_id is None:
-            raise ValueError(f"❌ Invalid task specified. Please choose one of {list(TASKS.keys())}")
+        if self.process:
+            self.params = self._process_params_data()
 
-        if self.hub_model is not None:
-            language = "unk"
-
-        if language not in SUPPORTED_LANGUAGES:
-            raise ValueError("❌ Invalid language. Please check supported languages in AutoTrain documentation.")
-
-        payload = {
-            "username": self.username,
-            "proj_name": self.name,
-            "task": task_id,
-            "config": {
-                "advanced": True,
-                "autotrain": True if self.param_choice == "autotrain" else False,
-                "language": language,
-                "max_models": self.max_models,
-                "hub_model": self.hub_model,
-                "params": self.job_params,
-            },
-        }
-        logger.info(f"🚀 Creating project with payload: {payload}")
-        json_resp = http_post(path="/projects/create", payload=payload, token=self.token).json()
-        proj_name = json_resp["proj_name"]
-        proj_id = json_resp["id"]
-        created = json_resp["created"]
-
-        if created is True:
-            return proj_id
-        raise ValueError(f"❌ Project with name {proj_name} already exists.")
-
-    def approve(self, project_id):
-        # Process data
-        _ = http_post(
-            path=f"/projects/{project_id}/data/start_processing",
-            token=self.token,
-        ).json()
-
-        logger.info("⏳ Waiting for data processing to complete ...")
-        is_data_processing_success = False
-        while is_data_processing_success is not True:
-            project_status = http_get(
-                path=f"/projects/{project_id}",
-                token=self.token,
-            ).json()
-            # See database.database.enums.ProjectStatus for definitions of `status`
-            if project_status["status"] == 3:
-                is_data_processing_success = True
-                logger.info("✅ Data processing complete!")
-
-            time.sleep(3)
-
-        logger.info(f"🚀 Approving project # {project_id}")
-        # Approve training job
-        _ = http_post(
-            path=f"/projects/{project_id}/start_training",
-            token=self.token,
-        ).json()
+        if self.backend.startswith("local"):
+            runner = LocalRunner(params=self.params, backend=self.backend)
+            return runner.create()
+        elif self.backend.startswith("spaces-"):
+            runner = SpaceRunner(params=self.params, backend=self.backend)
+            return runner.create()
+        elif self.backend.startswith("ep-"):
+            runner = EndpointsRunner(params=self.params, backend=self.backend)
+            return runner.create()
+        elif self.backend.startswith("ngc-"):
+            runner = NGCRunner(params=self.params, backend=self.backend)
+            return runner.create()
+        elif self.backend.startswith("nvcf-"):
+            runner = NVCFRunner(params=self.params, backend=self.backend)
+            return runner.create()
+        else:
+            raise NotImplementedError
